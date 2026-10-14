@@ -1,0 +1,91 @@
+{
+  "main": "agent-network.yaml",
+  "name": "lumen-agent-broker-v2-harness",
+  "classifier": "agentic-network",
+  "organizationId": "<your-org-id>",
+  "descriptorVersion": "1.0.0",
+  "tags": [],
+  "groupId": "<your-org-id>",
+  "assetId": "lumen-agent-broker-v2-harness",
+  "version": "1.0.0",
+  "description": "Lumen agent network (2.0, harness). Multi-node broker: classifies the request, always runs network diagnostics on reported downtime, gathers billing and recommendations read-only, offers field service slots and books only the slot the customer selects.",
+  "dependencies": [
+    {
+      "groupId": "<your-org-id>",
+      "assetId": "billingAgent",
+      "version": "1.0.0",
+      "classifier": "agent-metadata",
+      "packaging": "zip"
+    },
+    {
+      "groupId": "<your-org-id>",
+      "assetId": "networkDiagnosticAgent",
+      "version": "1.0.0",
+      "classifier": "agent-metadata",
+      "packaging": "zip"
+    },
+    {
+      "groupId": "<your-org-id>",
+      "assetId": "solutionAdvisorAgent",
+      "version": "1.0.0",
+      "classifier": "agent-metadata",
+      "packaging": "zip"
+    },
+    {
+      "groupId": "<your-org-id>",
+      "assetId": "googleGemini",
+      "version": "1.0.0",
+      "classifier": "llm-metadata",
+      "packaging": "zip"
+    }
+  ],
+  "metadata": {
+    "variables": {
+      "fieldServiceMcpServer": {
+        "url": {
+          "description": "fieldServiceMcpServer URL",
+          "default": "https://<field-service-mcp-server-url>",
+          "secret": false
+        }
+      },
+      "networkDiagnosticAgent": {
+        "url": {
+          "description": "networkDiagnosticAgent URL",
+          "default": "https://<network-diagnostic-agent-url>",
+          "secret": false
+        }
+      },
+      "solutionAdvisorAgent": {
+        "url": {
+          "description": "solutionAdvisorAgent URL",
+          "default": "https://<solution-advisor-agent-url>",
+          "secret": false
+        }
+      },
+      "billingAgent": {
+        "url": {
+          "description": "billing Agent URL",
+          "default": "https://<billing-agent-url>",
+          "secret": false
+        }
+      },
+      "googleGemini": {
+        "url": {
+          "description": "Google Gemini API URL",
+          "default": "https://generativelanguage.googleapis.com/",
+          "secret": false
+        },
+        "modelName": {
+          "description": "Google Gemini Model Name",
+          "default": "gemini-3.8-flash",
+          "secret": false
+        },
+        "apiKey": {
+          "description": "Google Gemini API key",
+          "secret": true
+        }
+      }
+    }
+  },
+  "apiVersion": "v1"
+}

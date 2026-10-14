@@ -1,0 +1,53 @@
+---
+title: Lumen Broker (harness) — brokers/lumen-broker.agent
+---
+flowchart TD
+    trigger(["trigger lumenBrokerTrigger<br/>A2A message in"])
+    classify["classifyRequest · LLM<br/><i>generator, no tools</i><br/>wants_invoice · reports_downtime<br/>wants_recommendations · wants_appointment"]
+    downtimeRouter{"downtimeRouter"}
+    runDiagnostics["runDiagnostics · LLM<br/><i>subagent · loops ≤ 3 · 120 s</i><br/>Network Diagnostics Agent"]
+    saveDiagnostics[/"saveDiagnostics<br/>set diagnostics_findings"/]
+    invoiceRouter{"invoiceRouter"}
+    getInvoice["getInvoice · LLM<br/><i>subagent · loops ≤ 3 · 120 s</i><br/>Billing Agent (read-only)"]
+    saveInvoice[/"saveInvoice<br/>set invoice_summary"/]
+    recommendationsRouter{"recommendationsRouter"}
+    getRecommendations["getRecommendations · LLM<br/><i>subagent · loops ≤ 3 · 180 s</i><br/>Solution Advisor (read-only)"]
+    saveRecommendations[/"saveRecommendations<br/>set recommendations_summary"/]
+    appointmentRouter{"appointmentRouter"}
+    chooseSlot["chooseSlot · LLM<br/><i>subagent · loops ≤ 5</i><br/>get-field-service-slots (read-only)<br/>asks customer A / B / C"]
+    customer(("customer"))
+    bookingRouter{"bookingRouter"}
+    bookSlot["⚠ WRITE · only node that can book<br/>bookSlot · LLM<br/><i>subagent · loops ≤ 4</i><br/>confirm-field-service-booking<br/>slotId = selected_slot (pinned)"]
+    saveBooking[/"saveBooking<br/>set booked_slot · booking_status<br/>service_request_id"/]
+    compose["composeResponse · LLM<br/><i>generator, no tools</i><br/>Invoice · Recommendations ·<br/>Diagnostics · Appointment"]
+    echo(["echo lumenBrokerResponse<br/>TASK_STATE_COMPLETED"])
+
+    trigger --> classify --> downtimeRouter
+    downtimeRouter -- "reports_downtime == yes" --> runDiagnostics --> saveDiagnostics --> invoiceRouter
+    downtimeRouter -- otherwise --> invoiceRouter
+    invoiceRouter -- "wants_invoice == yes" --> getInvoice --> saveInvoice --> recommendationsRouter
+    invoiceRouter -- otherwise --> recommendationsRouter
+    recommendationsRouter -- "wants_recommendations == yes" --> getRecommendations --> saveRecommendations --> appointmentRouter
+    recommendationsRouter -- otherwise --> appointmentRouter
+    appointmentRouter -- "wants_appointment == yes" --> chooseSlot
+    appointmentRouter -- otherwise --> compose
+    chooseSlot -. "INPUT_REQUIRED" .-> customer
+    customer -. "reply: A / B / C" .-> chooseSlot
+    chooseSlot --> bookingRouter
+    bookingRouter -- "selected_slot != none" --> bookSlot --> saveBooking --> compose
+    bookingRouter -- "otherwise (none)" --> compose
+    compose --> echo
+
+    classDef llm fill:#FFFFFF,stroke:#0176D3,stroke-width:2px,color:#181818
+    classDef router fill:#F3F3F3,stroke:#014486,stroke-width:2px,color:#014486
+    classDef exec fill:#F3F3F3,stroke:#C9C9C9,color:#444444
+    classDef write fill:#FFFFFF,stroke:#FE9339,stroke-width:3px,color:#181818
+    classDef io fill:#032D60,stroke:#032D60,color:#FFFFFF
+    classDef person fill:#1B96FF,stroke:#1B96FF,color:#FFFFFF
+
+    class classify,runDiagnostics,getInvoice,getRecommendations,chooseSlot,compose llm
+    class downtimeRouter,invoiceRouter,recommendationsRouter,appointmentRouter,bookingRouter router
+    class saveDiagnostics,saveInvoice,saveRecommendations,saveBooking exec
+    class bookSlot write
+    class trigger,echo io
+    class customer person

@@ -1,0 +1,382 @@
+# @dialect: AGENTFABRIC=1.0
+
+system:
+  instructions: "You are the Lumen Broker. You get current network details, field services operations, network diagnostic details and billing details."
+
+config:
+  agent_name: "lumen-broker-harness"
+  label: "Lumen Broker (harness)"
+  description: "The broker allows us to get current network details, fields services operations, network diagnostic details and billing details"
+  default_llm: @llm.gemini_flash
+
+
+# -- LLM ----------------------------------------------------------------------
+
+llm:
+  gemini_flash:
+    target: "llm://harness_google_gemini_connection"
+    kind: "Gemini"
+    model: "gemini-3.8-flash"
+    temperature: 0.3
+    top_p: 0.95
+    max_output_tokens: 5000
+    timeout: 600
+
+
+# -- ACTION DEFINITIONS -------------------------------------------------------
+
+actions:
+  network_diagnostic_agent:
+    target: "a2a://harness_network_diagnostic_agent_connection"
+    kind: "a2a:send_message"
+
+  solution_advisor_agent:
+    target: "a2a://harness_solution_advisor_agent_connection"
+    kind: "a2a:send_message"
+
+  billing_agent:
+    target: "a2a://harness_billing_agent_connection"
+    kind: "a2a:send_message"
+
+  get_field_service_slots:
+    target: "mcp://harness_field_service_mcp_inline_connection"
+    kind: "mcp:tool"
+    tool_name: "get-field-service-slots"
+
+  confirm_field_service_booking:
+    target: "mcp://harness_field_service_mcp_inline_connection"
+    kind: "mcp:tool"
+    tool_name: "confirm-field-service-booking"
+    inputs:
+      slotId: string
+
+
+# -- SHARED STATE -------------------------------------------------------------
+# Written by optional paths, read by composeResponse.
+
+variables:
+  diagnostics_findings: mutable string = ""
+  invoice_summary: mutable string = ""
+  recommendations_summary: mutable string = ""
+  booked_slot: mutable string = ""
+  booking_status: mutable string = ""
+  service_request_id: mutable string = ""
+
+
+# -- TRIGGER ------------------------------------------------------------------
+
+trigger lumenBrokerTrigger:
+  kind: "a2a"
+  target: "brokers://lumen_broker_harness/a2a"
+  on_message: ->
+    transition to @generator.classifyRequest
+
+
+# -- CLASSIFY -----------------------------------------------------------------
+
+generator classifyRequest:
+  description: "Classifies which Lumen services the customer is asking for."
+  label: "Classify Request"
+  system:
+    instructions: |
+      Read the customer's message and decide which services it needs. Answer each flag with "yes" or "no".
+      1. wants_invoice: "yes" if the customer asks about their invoice, bill, charges or credits.
+      2. reports_downtime: "yes" if the customer reports downtime, an outage, a degraded or failing circuit, or asks about network circuit health.
+      3. wants_recommendations: "yes" if the customer asks for network analysis, recommendations or improvements.
+      4. wants_appointment: "yes" if the customer asks for field service appointment slots, a field engineer, or an on-site visit.
+      Also extract customer (the company name, "unknown" if not given), service_location (the address or area, "unknown" if not given) and request_details (the customer's request restated in one sentence, keeping constraints such as "only certified fiber/DIA technicians").
+  prompt: ->
+    | {!@request.payload.message.parts[0].text}
+  outputs:
+    properties:
+      wants_invoice:
+        type: "string"
+        enum:
+          - "yes"
+          - "no"
+      reports_downtime:
+        type: "string"
+        enum:
+          - "yes"
+          - "no"
+      wants_recommendations:
+        type: "string"
+        enum:
+          - "yes"
+          - "no"
+      wants_appointment:
+        type: "string"
+        enum:
+          - "yes"
+          - "no"
+      customer:
+        type: "string"
+      service_location:
+        type: "string"
+      request_details:
+        type: "string"
+  on_exit: ->
+    transition to @router.downtimeRouter
+
+
+# -- DIAGNOSTICS (always runs when downtime is reported) ----------------------
+
+router downtimeRouter:
+  description: "Always runs network diagnostics when downtime is reported."
+  routes:
+    - target: @subagent.runDiagnostics
+      when: @generator.classifyRequest.output.reports_downtime == "yes"
+      label: "Downtime reported"
+  otherwise:
+    target: @router.invoiceRouter
+
+subagent runDiagnostics:
+  description: "Diagnoses the customer's network circuits with the Network Diagnostics Agent."
+  label: "Run Diagnostics"
+  system:
+    instructions: |
+      1. Call network_diagnostics exactly once. In the message, include the customer, the service location and the reported issue.
+      2. Set findings to the faults, root cause, failover status and whether an on-site visit is required, as reported by the agent.
+      3. If the agent fails, is slow, returns an error, or replies with a question, do not pass it on: set findings to "Diagnostics are still pending." and finish.
+      4. Never ask the customer anything or request more input. You already have what you need; finish by setting your outputs.
+  reasoning:
+    instructions: ->
+      | Customer: {!@generator.classifyRequest.output.customer}
+      | Service location: {!@generator.classifyRequest.output.service_location}
+      | Request: {!@generator.classifyRequest.output.request_details}
+    actions:
+      network_diagnostics: @actions.network_diagnostic_agent
+    outputs:
+      properties:
+        findings:
+          type: "string"
+          description: "Circuit health findings from the Network Diagnostics Agent."
+    max_number_of_loops: 3
+    task_timeout_secs: 120
+  on_exit: ->
+    transition to @executor.saveDiagnostics
+
+executor saveDiagnostics:
+  description: "Stores the diagnostics findings for later nodes."
+  do: ->
+    set @variables.diagnostics_findings = @subagent.runDiagnostics.output.findings
+  on_exit: ->
+    transition to @router.invoiceRouter
+
+
+# -- INVOICE (read-only) -----------------------------------------------------
+
+router invoiceRouter:
+  description: "Retrieves invoice details only when asked for."
+  routes:
+    - target: @subagent.getInvoice
+      when: @generator.classifyRequest.output.wants_invoice == "yes"
+      label: "Invoice requested"
+  otherwise:
+    target: @router.recommendationsRouter
+
+subagent getInvoice:
+  description: "Retrieves the customer's invoice analysis from the Billing Agent. Read-only."
+  label: "Get Invoice"
+  system:
+    instructions: |
+      - If the user asks for invoice details, get them from the Billing Agent
+      1. Call billing exactly once with the customer name and the request.
+      2. Set invoice to the full result: totals, breakdown of charges, and any credits or adjustments.
+      If the Billing Agent fails, returns an error, or replies with a question, do not pass it on: set invoice to "Invoice details are not available right now." and finish.
+      3. Never ask the customer anything or request more input. You already have what you need; finish by setting your outputs.
+
+      ## GRACEFUL FAILURE
+      If a tool/specialist is slow, stay in character: "I am currently waiting for a final confirmation from our logistics team and will update you the moment I hear back."
+  reasoning:
+    instructions: ->
+      | Customer: {!@generator.classifyRequest.output.customer}
+      | Request: {!@request.payload.message.parts[0].text}
+    actions:
+      billing: @actions.billing_agent
+    outputs:
+      properties:
+        invoice:
+          type: "string"
+          description: "Invoice results including amounts, charges and credits."
+    max_number_of_loops: 3
+    task_timeout_secs: 120
+  on_exit: ->
+    transition to @executor.saveInvoice
+
+executor saveInvoice:
+  description: "Stores the invoice results for later nodes."
+  do: ->
+    set @variables.invoice_summary = @subagent.getInvoice.output.invoice
+  on_exit: ->
+    transition to @router.recommendationsRouter
+
+
+# -- RECOMMENDATIONS (read-only) ---------------------------------------------
+
+router recommendationsRouter:
+  description: "Retrieves network recommendations only when asked for."
+  routes:
+    - target: @subagent.getRecommendations
+      when: @generator.classifyRequest.output.wants_recommendations == "yes"
+      label: "Recommendations requested"
+  otherwise:
+    target: @router.appointmentRouter
+
+subagent getRecommendations:
+  description: "Retrieves network analysis and improvement recommendations from the Solution Advisor Agent. Read-only."
+  label: "Get Recommendations"
+  system:
+    instructions: |
+      - If the user asks for network analysis and recommend improvement, get them from the Solution Advisor Agent
+      1. Call solution_advisor exactly once with the customer name and the request.
+      2. Set recommendations to the full result: findings, recommended solutions and their cost impact.
+      If the Solution Advisor Agent fails, returns an error, or replies with a question, do not pass it on: set recommendations to "Recommendations are not available right now." and finish.
+      3. Never ask the customer anything or request more input. You already have what you need; finish by setting your outputs.
+
+      ## GRACEFUL FAILURE
+      If a tool/specialist is slow, stay in character: "I am currently waiting for a final confirmation from our logistics team and will update you the moment I hear back."
+  reasoning:
+    instructions: ->
+      | Customer: {!@generator.classifyRequest.output.customer}
+      | Request: {!@request.payload.message.parts[0].text}
+    actions:
+      solution_advisor: @actions.solution_advisor_agent
+    outputs:
+      properties:
+        recommendations:
+          type: "string"
+          description: "Network findings and improvement recommendations with cost impact."
+    max_number_of_loops: 3
+    task_timeout_secs: 180
+  on_exit: ->
+    transition to @executor.saveRecommendations
+
+executor saveRecommendations:
+  description: "Stores the recommendations for later nodes."
+  do: ->
+    set @variables.recommendations_summary = @subagent.getRecommendations.output.recommendations
+  on_exit: ->
+    transition to @router.appointmentRouter
+
+
+# -- APPOINTMENT (slots → user choice → booking) ------------------------------
+
+router appointmentRouter:
+  description: "Offers field service slots only when an appointment is requested."
+  routes:
+    - target: @subagent.chooseSlot
+      when: @generator.classifyRequest.output.wants_appointment == "yes"
+      label: "Appointment requested"
+  otherwise:
+    target: @generator.composeResponse
+
+subagent chooseSlot:
+  description: "Fetches available field service slots and asks the customer to pick one. Never books."
+  label: "Choose Slot"
+  system:
+    instructions: |
+      1. Call field_service_slots once to get the available slots.
+      2. Ask the customer which slot to book. The customer only sees your question, so put everything into it: the invoice, recommendations and diagnostics findings below (if any), then every available slot with its letter, date and time window.
+      3. When the customer replies, set selected_slot to the slot letter they chose ("A", "B" or "C").
+      4. If the customer declines or does not choose a listed slot, set selected_slot to "none".
+      You cannot book. Booking happens after you, only for the slot the customer selected.
+  reasoning:
+    instructions: ->
+      | Request: {!@generator.classifyRequest.output.request_details}
+      | Service location: {!@generator.classifyRequest.output.service_location}
+      | Invoice: {!@variables.invoice_summary}
+      | Recommendations: {!@variables.recommendations_summary}
+      | Diagnostics findings: {!@variables.diagnostics_findings}
+    actions:
+      field_service_slots: @actions.get_field_service_slots
+    outputs:
+      properties:
+        selected_slot:
+          type: "string"
+          enum:
+            - "A"
+            - "B"
+            - "C"
+            - "none"
+          description: "The slot letter the customer selected, or none."
+    max_number_of_loops: 5
+  on_exit: ->
+    transition to @router.bookingRouter
+
+router bookingRouter:
+  description: "Books only when the customer selected a slot."
+  routes:
+    - target: @subagent.bookSlot
+      when: @subagent.chooseSlot.output.selected_slot != "none"
+      label: "Slot selected"
+  otherwise:
+    target: @generator.composeResponse
+
+subagent bookSlot:
+  description: "Books the slot the customer selected. The only node that can book; the slot is pinned by the graph."
+  label: "Book Slot"
+  system:
+    instructions: |
+      1. Call book_selected_slot exactly once. The slot is already fixed; do not ask the customer anything.
+      2. Set service_request_id and booking_status from the booking confirmation.
+      3. If the booking fails, set booking_status to "failed" and service_request_id to "none".
+      4. Never ask the customer anything or request more input. You already have what you need; finish by setting your outputs.
+  reasoning:
+    instructions: ->
+      | Book slot {!@subagent.chooseSlot.output.selected_slot} for: {!@generator.classifyRequest.output.request_details}
+    actions:
+      book_selected_slot: @actions.confirm_field_service_booking
+        with slotId = @subagent.chooseSlot.output.selected_slot
+    outputs:
+      properties:
+        booking_status:
+          type: "string"
+          description: "Booking status from the confirmation, for example booking_confirmed."
+        service_request_id:
+          type: "string"
+          description: "The service request ID from the confirmation."
+    max_number_of_loops: 4
+  on_exit: ->
+    transition to @executor.saveBooking
+
+executor saveBooking:
+  description: "Stores the booking result for the response."
+  do: ->
+    set @variables.booked_slot = @subagent.chooseSlot.output.selected_slot
+    set @variables.booking_status = @subagent.bookSlot.output.booking_status
+    set @variables.service_request_id = @subagent.bookSlot.output.service_request_id
+  on_exit: ->
+    transition to @generator.composeResponse
+
+
+# -- RESPONSE -----------------------------------------------------------------
+
+generator composeResponse:
+  description: "Writes the final reply from everything gathered."
+  label: "Compose Response"
+  system:
+    instructions: |
+      Write the final reply to the customer in plain text with short bullet points, one section per service that was handled: Invoice, Recommendations, Network diagnostics, Field service appointment.
+      Only include sections that have content below. Use the exact amounts, times and IDs given. Do not mention tools, agents or internal steps.
+      Put the Invoice text below in the Invoice section, including any credits or adjustments it mentions. Put the Recommendations text below in the Recommendations section. Never move items between sections.
+  prompt: ->
+    | Customer request: {!@request.payload.message.parts[0].text}
+    | Invoice: {!@variables.invoice_summary}
+    | Recommendations: {!@variables.recommendations_summary}
+    | Diagnostics findings: {!@variables.diagnostics_findings}
+    | Booked slot: {!@variables.booked_slot}
+    | Booking status: {!@variables.booking_status}
+    | Service request ID: {!@variables.service_request_id}
+  on_exit: ->
+    transition to @echo.lumenBrokerResponse
+
+echo lumenBrokerResponse:
+  kind: "a2a:status_update_event"
+  state: "TASK_STATE_COMPLETED"
+  message: a2a.message({
+    messageId: uuid(),
+    parts: [
+      a2a.textPart(@generator.composeResponse.output)
+    ]
+  })

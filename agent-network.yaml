@@ -1,0 +1,153 @@
+agentNetwork: 2.0.0
+info:
+  label: Lumen Agent Network (harness)
+  version: 1.0.0
+  description: The broker allows us to get current network details, fields services operations, network diagnostic details and billing details
+  tags:
+    - lumen
+    - multi-agent
+    - gemini
+
+registry:
+  mcps:
+    fieldServiceMcpServerHarness:
+      info:
+        label: fieldServiceMcpServer
+        description: Field service MCP server for retrieving and booking certified field engineer appointment slots.
+      metadata:
+        transport:
+          kind: streamableHttp
+          path: /mcp
+        tools:
+          - name: get-field-service-slots
+            description: Fetches available appointment slots for certified field engineers based on service location, service type, and requested date. Does not perform booking.
+            inputSchema:
+              type: object
+              properties: {}
+          - name: confirm-field-service-booking
+            description: Confirms and books a selected appointment slot by locking the time window with an available certified technician. Generates a service request ID and triggers customer notification.
+            inputSchema:
+              type: object
+              properties:
+                slotId:
+                  type: string
+                  enum: [A, B, C]
+                  description: The appointment slot the customer selected from get-field-service-slots.
+              required: [slotId]
+
+context:
+  connections:
+    harness_field_service_mcp_inline_connection:
+      kind: mcp
+      ref:
+        name: fieldServiceMcpServerHarness
+      url: ${fieldServiceMcpServer.url}
+    harness_network_diagnostic_agent_connection:
+      kind: a2a
+      ref:
+        name: networkDiagnosticAgent
+        namespace: <your-org-id>
+      url: ${networkDiagnosticAgent.url}
+    harness_solution_advisor_agent_connection:
+      kind: a2a
+      ref:
+        name: solutionAdvisorAgent
+        namespace: <your-org-id>
+      url: ${solutionAdvisorAgent.url}
+    harness_billing_agent_connection:
+      kind: a2a
+      ref:
+        name: billingAgent
+        namespace: <your-org-id>
+      url: ${billingAgent.url}
+    harness_google_gemini_connection:
+      kind: llm
+      ref:
+        name: googleGemini
+        namespace: <your-org-id>
+      url: ${googleGemini.url}
+      authentication:
+        kind: apiKey
+        apiKey: ${googleGemini.apiKey}
+
+brokers:
+  lumen_broker_harness:
+    kind: AgentScript
+    implementation: ./brokers/lumen-broker.agent
+    interfaces:
+      a2a:
+        card:
+          name: Lumen Broker (harness)
+          description: The broker allows us to get current network details, fields services operations, network diagnostic details and billing details
+          version: 1.0.0
+          capabilities:
+            streaming: false
+            pushNotifications: true
+          defaultInputModes:
+            - application/json
+            - text/plain
+          defaultOutputModes:
+            - application/json
+            - text/plain
+          skills:
+            - id: recommend-network-upgrades
+              name: recommend-network-upgrades
+              description: Analyzes the customer’s current network setup, traffic patterns, and growth trends by calling the Product Catalog and NaaS APIs. Identifies inefficiencies such as bandwidth overages and scaling limitations, and recommends optimized solutions (e.g., on-demand bandwidth, multi-cloud connectivity, security enhancements). Provides both technical recommendations and quantified financial impact to support decision-making.
+              tags: []
+              examples:
+                - Analyze Hartwell’s network and recommend improvements, including cost impact.
+              inputModes:
+                - application/json
+                - text/plain
+              outputModes:
+                - application/json
+                - text/plain
+            - id: diagnose-network-circuits
+              name: diagnose-network-circuits
+              description: Analyzes network circuit health by calling the Network OSS Monitor API using account and circuit identifiers. Detects faults, identifies root causes, evaluates failover behavior, and determines whether issues can be resolved remotely or require on-site intervention. Returns actionable findings for the orchestrator.
+              tags: []
+              examples:
+                - Diagnose the health of all DIA circuits associated with Hartwell account.
+                - Identify any active faults, root causes, failover status, and recommended actions.
+              inputModes:
+                - application/json
+                - text/plain
+              outputModes:
+                - application/json
+                - text/plain
+            - id: get-field-service-slots
+              name: get-field-service-slots
+              description: Fetches available appointment slots for certified field engineers based on service location, service type, and requested date. Ensures only qualified technicians (e.g., DIA/fiber specialists) are considered and returns structured time windows for customer selection. Does not perform booking.
+              tags: []
+              examples:
+                - Retrieve available field engineer appointment slots for a DIA circuit on-site inspection at 2500 Fairmount St, Dallas, TX for tomorrow. Only include certified fiber/DIA technicians.
+              inputModes:
+                - application/json
+                - text/plain
+              outputModes:
+                - application/json
+                - text/plain
+            - id: confirm-field-service-booking
+              name: confirm-field-service-booking
+              description: Confirms and books a selected appointment slot by locking the time window with an available certified technician. Generates a service request ID and triggers customer notification (e.g., email confirmation). Ensures the booking is finalized and ready for execution.
+              tags: []
+              examples:
+                - Book Slot A 9:00 AM - 11:00 AM CT
+              inputModes:
+                - application/json
+                - text/plain
+              outputModes:
+                - application/json
+                - text/plain
+            - id: get-invoice-analysis
+              name: get_invoice_analysis
+              description: Retrieves a customer’s current invoice and billing breakdown, analyzes elevated charges against typical billing patterns, validates the reason for the overage, checks whether the customer is eligible for credits or goodwill adjustments, and returns a structured summary with recommendations.
+              tags: []
+              examples:
+                - can you check my current invoice?
+              inputModes:
+                - application/json
+                - text/plain
+              outputModes:
+                - application/json
+                - text/plain

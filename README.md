@@ -452,9 +452,3 @@ Re-run turn 1 several times after any prompt change; LLM steps are still non-det
 - **Broker allows anonymous callers** (no `authorization` on `brokers.lumen_broker_harness.interfaces.a2a`).
 - **A2A agents are v0.3**; move them to the `a2a` interface branch when their owners upgrade to v1.0.
 - **Upgrade check:** confirm the latest Agent Fabric CLI and runtime versions before reusing this baseline.
-
----
-
-## License
-
-Copyright 2026 Salesforce, Inc. Licensed under the [Apache License, Version 2.0](LICENSE). See [NOTICE](NOTICE).
